@@ -1,9 +1,8 @@
 export class ApiClient {
   private resolve(): { baseUrl: string; apiKey: string } {
-    const baseUrl = process.env.SUPERIOR_TRADE_API_URL;
+    const baseUrl = process.env.SUPERIOR_TRADE_API_URL || "https://api.superior.trade";
     const apiKey = process.env.SUPERIOR_TRADE_API_KEY;
 
-    if (!baseUrl) throw new Error("SUPERIOR_TRADE_API_URL environment variable is required");
     if (!apiKey) throw new Error("SUPERIOR_TRADE_API_KEY environment variable is required");
 
     return { baseUrl: baseUrl.replace(/\/$/, ""), apiKey };

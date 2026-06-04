@@ -8,14 +8,14 @@ export function registerBacktestTools(server: McpServer, client: ApiClient) {
     "List all backtests with cursor pagination. Use get_backtest for full details on a specific backtest.",
     {
       cursor: z.string().optional().describe("Pagination cursor from previous response's nextCursor"),
-      limit: z.number().optional().describe("Number of items per page"),
+      pageSize: z.number().optional().describe("Number of items per page"),
     },
-    async ({ cursor, limit }) => {
+    async ({ cursor, pageSize }) => {
       const params = new URLSearchParams();
       if (cursor) params.set("cursor", cursor);
-      if (limit) params.set("limit", String(limit));
+      if (pageSize) params.set("pageSize", String(pageSize));
       const qs = params.toString();
-      const result = await client.get(`/v1/backtesting${qs ? `?${qs}` : ""}`);
+      const result = await client.get(`/v2/backtesting${qs ? `?${qs}` : ""}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -35,10 +35,9 @@ Do NOT include dry_run or api_server in config.`,
         start: z.string().describe("Start date YYYY-MM-DD"),
         end: z.string().describe("End date YYYY-MM-DD"),
       }).describe("Backtest time range"),
-      stake_amount: z.number().describe("Stake amount per trade in stake currency"),
     },
-    async ({ config, code, timerange, stake_amount }) => {
-      const result = await client.post("/v1/backtesting", { config, code, timerange, stake_amount });
+    async ({ config, code, timerange }) => {
+      const result = await client.post("/v2/backtesting", { config, code, timerange });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -50,7 +49,7 @@ Do NOT include dry_run or api_server in config.`,
       id: z.string().describe("Backtest ID"),
     },
     async ({ id }) => {
-      const result = await client.get(`/v1/backtesting/${id}`);
+      const result = await client.get(`/v2/backtesting/${id}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -62,7 +61,7 @@ Do NOT include dry_run or api_server in config.`,
       id: z.string().describe("Backtest ID"),
     },
     async ({ id }) => {
-      const result = await client.get(`/v1/backtesting/${id}/status`);
+      const result = await client.get(`/v2/backtesting/${id}/status`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -74,19 +73,19 @@ Do NOT include dry_run or api_server in config.`,
       id: z.string().describe("Backtest ID"),
     },
     async ({ id }) => {
-      const result = await client.put(`/v1/backtesting/${id}/status`, { action: "start" });
+      const result = await client.put(`/v2/backtesting/${id}/status`, { action: "start" });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
 
   server.tool(
     "cancel_backtest",
-    "Cancel a running or pending backtest.",
+    "Stop a running or pending backtest.",
     {
       id: z.string().describe("Backtest ID"),
     },
     async ({ id }) => {
-      const result = await client.put(`/v1/backtesting/${id}/status`, { action: "cancel" });
+      const result = await client.put(`/v2/backtesting/${id}/status`, { action: "stop" });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -104,7 +103,7 @@ Do NOT include dry_run or api_server in config.`,
       if (pageSize) params.set("pageSize", String(pageSize));
       if (pageToken) params.set("pageToken", pageToken);
       const qs = params.toString();
-      const result = await client.get(`/v1/backtesting/${id}/logs${qs ? `?${qs}` : ""}`);
+      const result = await client.get(`/v2/backtesting/${id}/logs${qs ? `?${qs}` : ""}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -116,7 +115,7 @@ Do NOT include dry_run or api_server in config.`,
       id: z.string().describe("Backtest ID"),
     },
     async ({ id }) => {
-      const result = await client.delete(`/v1/backtesting/${id}`);
+      const result = await client.delete(`/v2/backtesting/${id}`);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );
