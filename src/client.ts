@@ -1,11 +1,24 @@
 export class ApiClient {
+  /**
+   * @param apiKey  Per-instance key. Omit for the stdio/local server (reads
+   *   SUPERIOR_TRADE_API_KEY from env). The HTTP transport passes the key from
+   *   each request so one server can serve many users (one key per session).
+   */
+  constructor(
+    private readonly apiKey?: string,
+    private readonly baseUrl: string = process.env.SUPERIOR_TRADE_API_URL || "https://api.superior.trade",
+  ) {}
+
   private resolve(): { baseUrl: string; apiKey: string } {
-    const baseUrl = process.env.SUPERIOR_TRADE_API_URL || "https://api.superior.trade";
-    const apiKey = process.env.SUPERIOR_TRADE_API_KEY;
+    const apiKey = this.apiKey ?? process.env.SUPERIOR_TRADE_API_KEY;
 
-    if (!apiKey) throw new Error("SUPERIOR_TRADE_API_KEY environment variable is required");
+    if (!apiKey) {
+      throw new Error(
+        "SUPERIOR_TRADE_API_KEY is required (env var for the local/stdio server, or an Authorization: Bearer <key> header for the HTTP server)",
+      );
+    }
 
-    return { baseUrl: baseUrl.replace(/\/$/, ""), apiKey };
+    return { baseUrl: this.baseUrl.replace(/\/$/, ""), apiKey };
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {
