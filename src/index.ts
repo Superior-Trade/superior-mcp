@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ApiClient } from "./client.js";
+import { requestStateCodec } from "./confirm.js";
 import { registerHealthTools } from "./tools/health.js";
 import { registerBacktestTools } from "./tools/backtest.js";
 import { registerDeploymentTools } from "./tools/deployment.js";
@@ -15,7 +16,14 @@ const client = new ApiClient();
 serveStdio(() => {
   const server = new McpServer(
     { name: "superior-trade", version: "2.0.0" },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      // requestState round-trips through the client, so it is
+      // attacker-controlled. The codec's verify rejects a forged or expired
+      // approval token at the seam, before any handler runs, and hands the
+      // decoded binding to the handler.
+      requestState: { verify: requestStateCodec.verify },
+    },
   );
 
   registerHealthTools(server, client);

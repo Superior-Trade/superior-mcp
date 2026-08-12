@@ -1,7 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { ApiClient } from "../client.js";
+
 import { requireConfirmation } from "../confirm.js";
+
+const SafeId = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,128}$/, "must be letters, digits, underscores or hyphens");
 
 const json = (result: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
@@ -18,7 +23,7 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
           .string()
           .optional()
           .describe("Pagination cursor from previous response's nextCursor"),
-        pageSize: z.number().optional().describe("Number of items per page"),
+        pageSize: z.coerce.number().optional().describe("Number of items per page"),
       }),
       annotations: { readOnlyHint: true },
     },
@@ -41,6 +46,7 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
         code: z.string().describe("Python strategy code (valid IStrategy subclass)"),
         name: z.string().describe("Human-readable deployment name"),
       }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     async ({ config, code, name }) => {
       return json(await client.post("/v2/deployment", { config, code, name }));
@@ -52,7 +58,7 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
     {
       description:
         "Get full deployment details including status, pods, and credentials status. credentialsStatus must be 'stored' before starting.",
-      inputSchema: z.object({ id: z.string().describe("Deployment ID") }),
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => json(await client.get(`/v2/deployment/${id}`)),
@@ -62,7 +68,7 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
     "get_deployment_status",
     {
       description: "Get live deployment status with pod info. Shows real-time K8s status.",
-      inputSchema: z.object({ id: z.string().describe("Deployment ID") }),
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => json(await client.get(`/v2/deployment/${id}/status`)),
@@ -77,16 +83,30 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
     {
       description:
         "Start a stopped deployment. If credentials are stored this trades REAL funds and the user is asked to confirm before anything starts. Credentials must be stored first (credentialsStatus: 'stored'); use add_deployment_credentials if missing.",
-      inputSchema: z.object({ id: z.string().describe("Deployment ID") }),
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
       annotations: { destructiveHint: true, idempotentHint: false },
     },
     async ({ id }, ctx) => {
       const deployment = (await client.get(`/v2/deployment/${id}`)) as Record<string, any>;
-      const isLive = deployment?.credentialsStatus === "stored";
       const config = deployment?.config ?? {};
 
-      if (isLive) {
-        const outcome = requireConfirmation(ctx, {
+      // Fail closed. Confirmation is skipped only when the API positively
+      // reports a dry-run deployment; an unrecognised, malformed or missing
+      // credentialsStatus means we cannot prove no real funds are at stake, so
+      // we ask. Previously any value other than the exact string "stored" —
+      // including a null body or a differently-cased value — started trading
+      // with no prompt at all.
+      const status =
+        deployment && typeof deployment === "object" && !Array.isArray(deployment)
+          ? deployment.credentialsStatus
+          : undefined;
+      const provablyDryRun =
+        typeof status === "string" && ["missing", "none", "absent"].includes(status.toLowerCase());
+
+      if (!provablyDryRun) {
+        const outcome = await requireConfirmation(ctx, {
+          tool: "start_deployment",
+          args: { id },
           action: "Start live deployment",
           details: [
             ["Strategy", deployment?.name ?? id],
@@ -113,7 +133,8 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
     {
       description:
         "Stop a running deployment. Scales pods to 0. Can be restarted later with start_deployment.",
-      inputSchema: z.object({ id: z.string().describe("Deployment ID") }),
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ id }) => json(await client.put(`/v2/deployment/${id}/status`, { action: "stop" })),
   );
@@ -125,7 +146,7 @@ export function registerDeploymentTools(server: McpServer, client: ApiClient) {
 The v2 API does not accept private keys. If wallet_address is omitted, Superior uses the user's main trading wallet.
 For Hyperliquid subaccounts, pass subaccount_address.`,
       inputSchema: z.object({
-        id: z.string().describe("Deployment ID"),
+        id: SafeId.describe("Deployment ID"),
         exchange: z.enum(["hyperliquid", "aerodrome"]).describe("Exchange name"),
         wallet_address: z
           .string()
@@ -136,6 +157,7 @@ For Hyperliquid subaccounts, pass subaccount_address.`,
           .optional()
           .describe("Optional Hyperliquid subaccount address."),
       }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ id, exchange, wallet_address, subaccount_address }) => {
       const body: Record<string, string> = { exchange };
@@ -151,7 +173,7 @@ For Hyperliquid subaccounts, pass subaccount_address.`,
       description:
         "Get deployment logs from Cloud Logging. Use to monitor live trading activity or diagnose issues. Supports pagination.",
       inputSchema: z.object({
-        id: z.string().describe("Deployment ID"),
+        id: SafeId.describe("Deployment ID"),
         pageSize: z.coerce
           .number()
           .optional()
@@ -174,13 +196,15 @@ For Hyperliquid subaccounts, pass subaccount_address.`,
     {
       description:
         "Permanently delete a deployment and its K8s resources. Stops the deployment first if running. The user is asked to confirm; deletion cannot be undone.",
-      inputSchema: z.object({ id: z.string().describe("Deployment ID") }),
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
       annotations: { destructiveHint: true, idempotentHint: false },
     },
     async ({ id }, ctx) => {
       const deployment = (await client.get(`/v2/deployment/${id}`)) as Record<string, any>;
 
-      const outcome = requireConfirmation(ctx, {
+      const outcome = await requireConfirmation(ctx, {
+        tool: "delete_deployment",
+        args: { id },
         action: "Permanently delete deployment",
         details: [
           ["Strategy", deployment?.name ?? id],
