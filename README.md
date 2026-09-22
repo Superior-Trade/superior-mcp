@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Archived:** This open-source MCP server is no longer maintained. Use the hosted Superior Trade MCP server at **https://api.superior.trade/mcp**.
+
 # Superior Trade MCP Server
 
 Use Superior Trade from Cursor, Claude Code, Claude Desktop, Windsurf, Codex, or any MCP-compatible local agent.
@@ -13,16 +16,6 @@ Use this MCP server when you already run an agent locally and want that agent to
 If you do not have an agent hosted on your machine, use [Superior Terminal](https://terminal.superior.trade/) instead. Terminal already hosts the agent experience for you, including chat, strategy drafting, backtests, deployments, skills, and workspace artifacts.
 
 ## Quick Start
-
-### Use the hosted MCP server
-
-Connect your MCP-compatible client directly to the hosted Superior Trade MCP server:
-
-```text
-https://api.superior.trade/mcp
-```
-
-This is the simplest option and does not require installing or running the server locally.
 
 ### Run locally
 
