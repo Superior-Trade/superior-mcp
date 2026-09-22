@@ -14,6 +14,18 @@ If you do not have an agent hosted on your machine, use [Superior Terminal](http
 
 ## Quick Start
 
+### Use the hosted MCP server
+
+Connect your MCP-compatible client directly to the hosted Superior Trade MCP server:
+
+```text
+https://api.superior.trade/mcp
+```
+
+This is the simplest option and does not require installing or running the server locally.
+
+### Run locally
+
 ```bash
 npm install
 npm run build
