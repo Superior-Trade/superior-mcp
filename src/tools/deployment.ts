@@ -1,134 +1,221 @@
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { ApiClient } from "../client.js";
 
+import { requireConfirmation } from "../confirm.js";
+
+const SafeId = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,128}$/, "must be letters, digits, underscores or hyphens");
+
+const json = (result: unknown) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+});
+
 export function registerDeploymentTools(server: McpServer, client: ApiClient) {
-  server.tool(
+  server.registerTool(
     "list_deployments",
-    "List all deployments with cursor pagination. Use get_deployment for full details.",
     {
-      cursor: z.string().optional().describe("Pagination cursor from previous response's nextCursor"),
-      pageSize: z.number().optional().describe("Number of items per page"),
+      description:
+        "List all deployments with cursor pagination. Use get_deployment for full details.",
+      inputSchema: z.object({
+        cursor: z
+          .string()
+          .optional()
+          .describe("Pagination cursor from previous response's nextCursor"),
+        pageSize: z.coerce.number().optional().describe("Number of items per page"),
+      }),
+      annotations: { readOnlyHint: true },
     },
     async ({ cursor, pageSize }) => {
       const params = new URLSearchParams();
       if (cursor) params.set("cursor", cursor);
       if (pageSize) params.set("pageSize", String(pageSize));
       const qs = params.toString();
-      const result = await client.get(`/v2/deployment${qs ? `?${qs}` : ""}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+      return json(await client.get(`/v2/deployment${qs ? `?${qs}` : ""}`));
+    },
   );
 
-  server.tool(
+  server.registerTool(
     "create_deployment",
-    "Create a live trading deployment. After creation, add credentials with add_deployment_credentials before starting. Config/code validation is the same as backtesting.",
     {
-      config: z.object({}).passthrough().describe("Freqtrade configuration object"),
-      code: z.string().describe("Python strategy code (valid IStrategy subclass)"),
-      name: z.string().describe("Human-readable deployment name"),
+      description:
+        "Create a live trading deployment. After creation, add credentials with add_deployment_credentials before starting. Creating does not start trading. Config/code validation is the same as backtesting.",
+      inputSchema: z.object({
+        config: z.object({}).passthrough().describe("Freqtrade configuration object"),
+        code: z.string().describe("Python strategy code (valid IStrategy subclass)"),
+        name: z.string().describe("Human-readable deployment name"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     },
     async ({ config, code, name }) => {
-      const result = await client.post("/v2/deployment", { config, code, name });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+      return json(await client.post("/v2/deployment", { config, code, name }));
+    },
   );
 
-  server.tool(
+  server.registerTool(
     "get_deployment",
-    "Get full deployment details including status, pods, and credentials status. credentialsStatus must be 'stored' before starting.",
     {
-      id: z.string().describe("Deployment ID"),
+      description:
+        "Get full deployment details including status, pods, and credentials status. credentialsStatus must be 'stored' before starting.",
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { readOnlyHint: true },
     },
-    async ({ id }) => {
-      const result = await client.get(`/v2/deployment/${id}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id }) => json(await client.get(`/v2/deployment/${id}`)),
   );
 
-  server.tool(
+  server.registerTool(
     "get_deployment_status",
-    "Get live deployment status with pod info. Shows real-time K8s status.",
     {
-      id: z.string().describe("Deployment ID"),
+      description: "Get live deployment status with pod info. Shows real-time K8s status.",
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { readOnlyHint: true },
     },
-    async ({ id }) => {
-      const result = await client.get(`/v2/deployment/${id}/status`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id }) => json(await client.get(`/v2/deployment/${id}/status`)),
   );
 
-  server.tool(
+  // Starting a deployment with stored credentials commits real capital to a
+  // live market. The confirmation is enforced here rather than left to the
+  // calling model, and the summary is built from what the API actually
+  // reports rather than from what the caller claims.
+  server.registerTool(
     "start_deployment",
-    "Start a stopped deployment. Credentials must be stored first (credentialsStatus: 'stored'). Use add_deployment_credentials if missing.",
     {
-      id: z.string().describe("Deployment ID"),
+      description:
+        "Start a stopped deployment. If credentials are stored this trades REAL funds and the user is asked to confirm before anything starts. Credentials must be stored first (credentialsStatus: 'stored'); use add_deployment_credentials if missing.",
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { destructiveHint: true, idempotentHint: false },
     },
-    async ({ id }) => {
-      const result = await client.put(`/v2/deployment/${id}/status`, { action: "start" });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id }, ctx) => {
+      const deployment = (await client.get(`/v2/deployment/${id}`)) as Record<string, any>;
+      const config = deployment?.config ?? {};
+
+      // Fail closed. Confirmation is skipped only when the API positively
+      // reports a dry-run deployment; an unrecognised, malformed or missing
+      // credentialsStatus means we cannot prove no real funds are at stake, so
+      // we ask. Previously any value other than the exact string "stored" —
+      // including a null body or a differently-cased value — started trading
+      // with no prompt at all.
+      const status =
+        deployment && typeof deployment === "object" && !Array.isArray(deployment)
+          ? deployment.credentialsStatus
+          : undefined;
+      const provablyDryRun =
+        typeof status === "string" && ["missing", "none", "absent"].includes(status.toLowerCase());
+
+      if (!provablyDryRun) {
+        const outcome = await requireConfirmation(ctx, {
+          tool: "start_deployment",
+          args: { id },
+          action: "Start live deployment",
+          details: [
+            ["Strategy", deployment?.name ?? id],
+            ["Exchange", config?.exchange?.name],
+            ["Trading mode", config?.trading_mode],
+            ["Pairs", (config?.exchange?.pair_whitelist ?? []).join(", ")],
+            ["Stake per trade", config?.stake_amount],
+            ["Max open trades", config?.max_open_trades],
+            ["Stoploss", config?.stoploss],
+            ["Margin mode", config?.margin_mode],
+          ],
+          consequence:
+            "This starts trading with REAL funds from the connected wallet. The agent cannot undo filled trades.",
+        });
+        if (!outcome.approved) return outcome.result;
+      }
+
+      return json(await client.put(`/v2/deployment/${id}/status`, { action: "start" }));
+    },
   );
 
-  server.tool(
+  server.registerTool(
     "stop_deployment",
-    "Stop a running deployment. Scales pods to 0. Can be restarted later with start_deployment.",
     {
-      id: z.string().describe("Deployment ID"),
+      description:
+        "Stop a running deployment. Scales pods to 0. Can be restarted later with start_deployment.",
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
-    async ({ id }) => {
-      const result = await client.put(`/v2/deployment/${id}/status`, { action: "stop" });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id }) => json(await client.put(`/v2/deployment/${id}/status`, { action: "stop" })),
   );
 
-  server.tool(
+  server.registerTool(
     "add_deployment_credentials",
-    `Attach deployment credentials through Superior Trade wallet lookup.
+    {
+      description: `Attach deployment credentials through Superior Trade wallet lookup.
 The v2 API does not accept private keys. If wallet_address is omitted, Superior uses the user's main trading wallet.
 For Hyperliquid subaccounts, pass subaccount_address.`,
-    {
-      id: z.string().describe("Deployment ID"),
-      exchange: z.enum(["hyperliquid", "aerodrome"]).describe("Exchange name"),
-      wallet_address: z.string().optional().describe("Optional wallet address. Defaults to the user's main trading wallet."),
-      subaccount_address: z.string().optional().describe("Optional Hyperliquid subaccount address."),
+      inputSchema: z.object({
+        id: SafeId.describe("Deployment ID"),
+        exchange: z.enum(["hyperliquid", "aerodrome"]).describe("Exchange name"),
+        wallet_address: z
+          .string()
+          .optional()
+          .describe("Optional wallet address. Defaults to the user's main trading wallet."),
+        subaccount_address: z
+          .string()
+          .optional()
+          .describe("Optional Hyperliquid subaccount address."),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ id, exchange, wallet_address, subaccount_address }) => {
       const body: Record<string, string> = { exchange };
       if (wallet_address) body.wallet_address = wallet_address;
       if (subaccount_address) body.subaccount_address = subaccount_address;
-      const result = await client.post(`/v2/deployment/${id}/credentials`, body);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+      return json(await client.post(`/v2/deployment/${id}/credentials`, body));
+    },
   );
 
-  server.tool(
+  server.registerTool(
     "get_deployment_logs",
-    "Get deployment logs from Cloud Logging. Use to monitor live trading activity or diagnose issues. Supports pagination.",
     {
-      id: z.string().describe("Deployment ID"),
-      pageSize: z.coerce.number().optional().describe("Number of log entries per page (default 100)"),
-      pageToken: z.string().optional().describe("Pagination token from previous response"),
+      description:
+        "Get deployment logs from Cloud Logging. Use to monitor live trading activity or diagnose issues. Supports pagination.",
+      inputSchema: z.object({
+        id: SafeId.describe("Deployment ID"),
+        pageSize: z.coerce
+          .number()
+          .optional()
+          .describe("Number of log entries per page (default 100)"),
+        pageToken: z.string().optional().describe("Pagination token from previous response"),
+      }),
+      annotations: { readOnlyHint: true },
     },
     async ({ id, pageSize, pageToken }) => {
       const params = new URLSearchParams();
       if (pageSize) params.set("pageSize", String(pageSize));
       if (pageToken) params.set("pageToken", pageToken);
       const qs = params.toString();
-      const result = await client.get(`/v2/deployment/${id}/logs${qs ? `?${qs}` : ""}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+      return json(await client.get(`/v2/deployment/${id}/logs${qs ? `?${qs}` : ""}`));
+    },
   );
 
-  server.tool(
+  server.registerTool(
     "delete_deployment",
-    "Permanently delete a deployment and its K8s resources. Stops the deployment first if running.",
     {
-      id: z.string().describe("Deployment ID"),
+      description:
+        "Permanently delete a deployment and its K8s resources. Stops the deployment first if running. The user is asked to confirm; deletion cannot be undone.",
+      inputSchema: z.object({ id: SafeId.describe("Deployment ID") }),
+      annotations: { destructiveHint: true, idempotentHint: false },
     },
-    async ({ id }) => {
-      const result = await client.delete(`/v2/deployment/${id}`);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    }
+    async ({ id }, ctx) => {
+      const deployment = (await client.get(`/v2/deployment/${id}`)) as Record<string, any>;
+
+      const outcome = await requireConfirmation(ctx, {
+        tool: "delete_deployment",
+        args: { id },
+        action: "Permanently delete deployment",
+        details: [
+          ["Strategy", deployment?.name ?? id],
+          ["Current status", deployment?.status],
+        ],
+        consequence:
+          "This deletes the deployment and its resources. A running deployment is stopped first. This cannot be undone.",
+      });
+      if (!outcome.approved) return outcome.result;
+
+      return json(await client.delete(`/v2/deployment/${id}`));
+    },
   );
 }
